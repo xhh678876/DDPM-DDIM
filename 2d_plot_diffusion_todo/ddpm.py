@@ -222,6 +222,7 @@ class DiffusionModule(nn.Module):
         # 做成 (B,) 的步数张量
             t = torch.full((xt.size(0),), t_scalar, device=xt.device, dtype=torch.long)
             xt=self.p_sample(xt,t)
+            
         ######################
         x0_pred=xt
         return x0_pred
@@ -248,8 +249,11 @@ class DiffusionModule(nn.Module):
             alpha_prod_t_prev = extract(self.var_scheduler.alphas_cumprod, t_prev, xt)
         else:
             alpha_prod_t_prev = torch.ones_like(alpha_prod_t)
-
-        x_t_prev = xt
+        eps_pred = self.network(xt, t)
+        x0_pred = (xt - torch.sqrt(1.0 - alpha_prod_t) * eps_pred) / torch.sqrt(alpha_prod_t)
+        dir_xt = torch.sqrt(1.0 - alpha_prod_t_prev - eta**2 * (1.0 - alpha_prod_t / alpha_prod_t_prev)) * eps_pred
+        noise = eta * torch.sqrt(1.0 - alpha_prod_t / alpha_prod_t_prev) * torch.randn_like(xt)
+        x_t_prev = torch.sqrt(alpha_prod_t_prev) * x0_pred + dir_xt + noise                         
 
         ######################
         return x_t_prev

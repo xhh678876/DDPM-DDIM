@@ -91,6 +91,7 @@ Extend Task 1 to AFHQ image dataset.
 **Training**
 ```
 python train.py --mode {BETA_SCHEDULING} --predictor {PREDICTOR}
+python train.py --mode linear --predictor noise
 ```
 
 --mode: linear, quad, cosine
