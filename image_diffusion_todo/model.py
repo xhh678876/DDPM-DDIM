@@ -50,10 +50,19 @@ class DiffusionModule(nn.Module):
         B = x0.shape[0]    
         t = self.var_scheduler.uniform_sample_t(B, x0.device)
         x_t, eps = self.var_scheduler.add_noise(x0, t, eps=noise)
-        mean_pred = self.network(x_t, t, class_label) if class_label is not None else self.network(x_t, t)
-        alpha_t = self.var_scheduler.alphas[t].reshape(-1, 1, 1, 1)
-        alpha_bar_t = self.var_scheduler.alphas_cumprod[t].reshape(-1, 1, 1, 1)
-        mean_true = (1.0 / torch.sqrt(alpha_t)) * (x_t - ((1 - alpha_t) / torch.sqrt(1 - alpha_bar_t)) * eps)
+        mean_pred = (
+            self.network(x_t, t, class_label)
+            if class_label is not None
+            else self.network(x_t, t)
+        )
+
+        # 采用 scheduler.extract 保证与 x_t 同设备/形状，并对数值做稳定处理
+        beta_t = extract(self.var_scheduler.betas, t, x_t)
+        alpha_t = extract(self.var_scheduler.alphas, t, x_t)
+        alpha_bar_t = extract(self.var_scheduler.alphas_cumprod, t, x_t)
+
+        denom = torch.sqrt(torch.clamp(1.0 - alpha_bar_t, min=1e-20))
+        mean_true = (1.0 / torch.sqrt(alpha_t)) * (x_t - (beta_t / denom) * eps)
         loss = F.mse_loss(mean_pred, mean_true)
         ######################
         
