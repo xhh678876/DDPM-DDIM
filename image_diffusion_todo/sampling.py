@@ -7,96 +7,269 @@ from model import DiffusionModule     # 扩散模型的封装类，里面包含 
 from scheduler import DDPMScheduler   # 扩散调度器，定义 beta 序列（噪声调度方式）
 
 
-def main(args):
-    # ============ 1. 设置保存目录 ============
-    save_dir = Path(args.save_dir)                   # 将字符串路径转换为 Path 对象
-    save_dir.mkdir(exist_ok=True, parents=True)      # 如果目录不存在就创建（支持多级父目录）
+# def main(args):
+#     # ============ 0. 设备/随机数种子 ============
+#     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+#     torch.set_grad_enabled(False)
 
-    device = f"cuda:{args.gpu}"                      # 指定 GPU 设备，例如 "cuda:0"
+#     # ============ 1. 保存目录 ============
+#     save_dir = Path(args.save_dir)
+#     save_dir.mkdir(exist_ok=True, parents=True)
+
+#     # ============ 2. 加载模型（注意：model.py 的 load 已修复 weights_only） ============
+#     ddpm = DiffusionModule(None, None)     # 保持你工程的构造方式
+#     ddpm.load(args.ckpt_path)              # 建议按我之前的做法：先 safe_globals 再兜底 weights_only=False
+#     ddpm.eval().to(device)
+
+#     # ============ 3. predictor/mode 对齐（从 ckpt 路径里“猜提示”） ============
+#     # 例如 .../results/predictor_x0/beta_quad/.../last.ckpt
+#     ckpt_hint = str(args.ckpt_path).lower()
+#     hint_predictor = None
+#     if "predictor_noise" in ckpt_hint or "/noise/" in ckpt_hint:
+#         hint_predictor = "noise"
+#     elif "predictor_x0" in ckpt_hint or "/x0/" in ckpt_hint:
+#         hint_predictor = "x0"
+#     elif "predictor_mean" in ckpt_hint or "/mean/" in ckpt_hint:
+#         hint_predictor = "mean"
+
+#     hint_mode = None
+#     if "beta_linear" in ckpt_hint or "mode_linear" in ckpt_hint:
+#         hint_mode = "linear"
+#     elif "beta_cos" in ckpt_hint or "beta_cosine" in ckpt_hint or "mode_cosine" in ckpt_hint:
+#         hint_mode = "cosine"
+#     elif "beta_quad" in ckpt_hint or "mode_quad" in ckpt_hint:
+#         hint_mode = "quad"
+
+#     # 如果用户显式传了，就以命令行为准；否则用 ckpt 提示（避免错配）
+#     predictor = args.predictor if args.predictor else (hint_predictor or "noise")
+#     mode = args.mode if args.mode else (hint_mode or "linear")
+
+#     if hint_predictor and predictor != hint_predictor:
+#         print(f"[WARN] --predictor={predictor} 与 ckpt 提示 {hint_predictor} 不一致，已使用命令行参数。")
+#     if hint_mode and mode != hint_mode:
+#         print(f"[WARN] --mode={mode} 与 ckpt 提示 {hint_mode} 不一致，已使用命令行参数。")
+
+#     ddpm.predictor = predictor
+
+#     # ============ 4. 重新构建调度器（与训练 T 一致） ============
+#     # 取训练时的 T；若模型里没有就用命令行/默认
+#     T = getattr(getattr(ddpm, "var_scheduler", None), "num_train_timesteps", None)
+#     if T is None:
+#         T = 1000
+#         print(f"[INFO] 未从 ckpt 得到训练步数，使用默认 T={T}")
+
+#     var_sched = DDPMScheduler(
+#         T,
+#         beta_1=args.beta_1,
+#         beta_T=args.beta_T,
+#         mode=mode,
+#     )
+#     # 有些 scheduler 不是 nn.Module 没有 .to；这里做个保护
+#     if hasattr(var_sched, "to"):
+#         var_sched = var_sched.to(device)
+#     ddpm.var_scheduler = var_sched
+
+#     # ============ 5. 采样循环 ============
+#     total_num_samples = getattr(args, "num_samples", None) or 500
+#     num_batches = int(np.ceil(total_num_samples / args.batch_size))
+
+#     print(f"[INFO] Sampling: predictor={predictor}, mode={mode}, "
+#           f"T={T}, beta_1={args.beta_1}, beta_T={args.beta_T}, "
+#           f"num_samples={total_num_samples}, batch_size={args.batch_size}")
+
+#     for i in range(num_batches):
+#         sidx = i * args.batch_size
+#         eidx = min(sidx + args.batch_size, total_num_samples)
+#         B = eidx - sidx
+
+#         # 可选：启用 autocast（若你没用混精度，注释掉也行）
+#         # with torch.autocast(device_type=device.type, dtype=torch.float16 if device.type=="cuda" else torch.bfloat16):
+#         if args.use_cfg:
+#             assert getattr(ddpm.network, "use_cfg", False), \
+#                 "This checkpoint wasn't trained with CFG; 请去掉 --use_cfg 或换支持 CFG 的 ckpt。"
+#             # 这里假设类别数为 3（按你现在的写法）。如果不确定，可以把 num_classes 存到 ckpt 里并读取。
+#             class_label = torch.randint(0, 3, (B,), device=device)
+#             samples = ddpm.sample(
+#                 B,
+#                 class_label=class_label,
+#                 guidance_scale=args.cfg_scale,
+#                 sample_method=args.sample_method,
+#             )
+#         else:
+#             samples = ddpm.sample(
+#                 B,
+#                 sample_method=args.sample_method,
+#             )
+
+#         # 强制转 CPU 再喂保存函数，避免某些 PIL/transform 在 GPU 张量上出问题
+#         samples = samples.detach().to("cpu")
+
+#         for j, img in zip(range(sidx, eidx), tensor_to_pil_image(samples)):
+#             img.save(save_dir / f"{j}.png")
+#         print(f"[INFO] Saved images [{sidx}, {eidx})")
+
+#     print(f"[DONE] All images saved to: {save_dir}")
+def main(args):
+    
+
+    def save_tensor_png(x: torch.Tensor, out_path: Path):
+        """
+        兜底保存：支持 (C,H,W)/(H,W)/(H,W,C)，值域 [-1,1] 或 [0,1]。
+        """
+        x = x.detach().to("cpu").float()
+        if x.ndim == 3 and x.shape[0] in (1, 3, 4):   # (C,H,W)
+            # 统一到 [0,1]
+            if x.min() < 0:
+                x = (x.clamp(-1, 1) + 1) / 2.0
+            else:
+                x = x.clamp(0, 1)
+            x = x[:3]
+            x = x.permute(1, 2, 0)  # (H,W,C)
+        elif x.ndim == 2:  # (H,W)
+            x = x.unsqueeze(-1)     # (H,W,1)
+        elif x.ndim == 3 and x.shape[-1] in (1, 3, 4):  # (H,W,C)
+            if x.min() < 0:
+                x = (x.clamp(-1, 1) + 1) / 2.0
+            else:
+                x = x.clamp(0, 1)
+            x = x[..., :3]
+        else:
+            raise RuntimeError(f"Unexpected image tensor shape: {tuple(x.shape)}")
+
+        x = (x.clamp(0, 1) * 255.0).round().to(torch.uint8).numpy()
+        if x.ndim == 3 and x.shape[-1] == 3:
+            img = Image.fromarray(x, mode="RGB")
+        elif x.ndim == 3 and x.shape[-1] == 1:
+            img = Image.fromarray(x[..., 0], mode="L")
+        elif x.ndim == 2:
+            img = Image.fromarray(x, mode="L")
+        else:
+            raise RuntimeError(f"Unexpected array shape: {x.shape}")
+        img.save(out_path)
+
+    # ============ 0. 设备 ============
+    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
+    torch.set_grad_enabled(False)
+
+    # ============ 1. 保存目录 ============
+    save_dir = Path(args.save_dir)
+    save_dir.mkdir(exist_ok=True, parents=True)
+    print(f"[INFO] save_dir = {save_dir.resolve()}", flush=True)
 
     # ============ 2. 加载模型 ============
-    ddpm = DiffusionModule(None, None)               # 实例化扩散模型（参数具体在 DiffusionModule 内部处理）
-    ddpm.load(args.ckpt_path)                        # 从 checkpoint 文件加载训练好的权重
-    ddpm.eval().to(device)                           # 切换到 eval 模式（关闭 dropout 等），并移动到 GPU
+    ddpm = DiffusionModule(None, None)
+    print(f"[INFO] loading ckpt: {args.ckpt_path}", flush=True)
+    ddpm.load(args.ckpt_path)  # 确保 model.py 的 load 已处理 weights_only/safe_globals
+    ddpm.eval().to(device)
+    print(f"[INFO] model loaded. device={device}", flush=True)
 
-    # ============ 3. 配置预测器和调度器 ============
-    ddpm.predictor = args.predictor                  # 设置预测器类型：
-                                                     # - "noise" → 预测噪声 ε
-                                                     # - "x0"   → 预测原始图像 x0
-                                                     # - "mean" → 预测均值
+    # ============ 3. predictor / scheduler ============
+    ddpm.predictor = args.predictor
+    print(f"[INFO] predictor = {ddpm.predictor}", flush=True)
 
-    T = ddpm.var_scheduler.num_train_timesteps       # 获取训练时的扩散步数（如 T=1000）
-    ddpm.var_scheduler = DDPMScheduler(              # 重新构建一个采样调度器
-        T,
-        beta_1=args.beta_1,                          # β 序列的起始值
-        beta_T=args.beta_T,                          # β 序列的结束值
-        mode=args.mode,                              # β 的调度模式（linear / cosine / quad）
-    ).to(device)                                     # 将调度器移到 GPU
+    T = getattr(getattr(ddpm, "var_scheduler", None), "num_train_timesteps", None)
+    if T is None:
+        T = 1000
+        print(f"[WARN] 未从 ckpt 读取到训练步数，默认 T={T}", flush=True)
 
-    # ============ 4. 设置采样批次数 ============
-    total_num_samples = 500                          # 总共要采样的图像数量（固定为 500）
-    num_batches = int(np.ceil(total_num_samples / args.batch_size))  
-    # 用 batch_size 把总数分批，向上取整
+    ddpm.var_scheduler = DDPMScheduler(
+        T, beta_1=args.beta_1, beta_T=args.beta_T, mode=args.mode
+    )
+    if hasattr(ddpm.var_scheduler, "to"):
+        ddpm.var_scheduler = ddpm.var_scheduler.to(device)
+    print(f"[INFO] scheduler: mode={args.mode}, T={T}, beta_1={args.beta_1}, beta_T={args.beta_T}", flush=True)
 
-    # ============ 5. 开始循环采样 ============
+    # ============ 4. 采样批次数 ============
+    total_num_samples = args.num_samples
+    num_batches = int(np.ceil(total_num_samples / args.batch_size))
+    print(f"[INFO] total_num_samples={total_num_samples}, batch_size={args.batch_size}, num_batches={num_batches}", flush=True)
+
+    # ============ 5. 采样循环 ============
     for i in range(num_batches):
-        sidx = i * args.batch_size                   # 当前批次起始索引
-        eidx = min(sidx + args.batch_size, total_num_samples)  # 当前批次结束索引
-        B = eidx - sidx                              # 当前批次大小
+        sidx = i * args.batch_size
+        eidx = min(sidx + args.batch_size, total_num_samples)
+        B = eidx - sidx
+        print(f"[INFO] batch {i+1}/{num_batches}: sidx={sidx}, eidx={eidx}, B={B}", flush=True)
 
-        # ----- 5.1 是否启用 CFG（Classifier-Free Guidance） -----
-        if args.use_cfg:
-            # 确保模型的网络结构支持 CFG（即训练时是带条件的）
-            assert getattr(ddpm.network, "use_cfg", False), "This checkpoint wasn't trained with CFG."
+        try:
+            if args.use_cfg:
+                assert getattr(ddpm.network, "use_cfg", False), "This checkpoint wasn't trained with CFG."
+                class_label = torch.randint(0, 3, (B,), device=device)  # 如有 num_classes，可从 ckpt 读
+                samples = ddpm.sample(
+                    B,
+                    class_label=class_label,
+                    guidance_scale=args.cfg_scale,
+                )
+            else:
+                samples = ddpm.sample(B)
+        except Exception as e:
+            print(f"[ERROR] ddpm.sample() failed: {repr(e)}", flush=True)
+            raise
 
-            # 调用采样函数，生成带类别条件的样本
-            samples = ddpm.sample(
-                B,                                   # batch size
-                class_label=torch.randint(0, 3, (B,), device=device),  
-                # 随机生成类别标签（这里假设类别数为 3：0,1,2）
-                guidance_scale=args.cfg_scale,       # CFG 的引导强度（scale 越大越贴合条件）
-            )
+        if not isinstance(samples, torch.Tensor):
+            raise TypeError(f"samples is not a Tensor: {type(samples)}")
+        if samples.ndim == 3:
+            samples = samples.unsqueeze(0)  # 兼容 (C,H,W)
+        if samples.ndim != 4:
+            raise RuntimeError(f"Expect samples 4D (B,C,H,W), got {samples.ndim}D")
+        if samples.shape[0] != B:
+            print(f"[WARN] samples.shape[0] != B ({samples.shape[0]} != {B})", flush=True)
+
+        # —— 关键：先搬 CPU&float，再把值域规范到 [0,1] ——
+        samples = samples.detach().to("cpu").float()
+        if samples.min() < 0:
+            samples = (samples.clamp(-1, 1) + 1) / 2.0
         else:
-            # 无条件采样
-            samples = ddpm.sample(B)
+            samples = samples.clamp(0, 1)
 
-        # ----- 5.2 保存当前批次生成的图片 -----
-        for j, img in zip(range(sidx, eidx), tensor_to_pil_image(samples)):
-            img.save(save_dir / f"{j}.png")          # 保存图片为 j.png
-            print(f"Saved the {j}-th image.")        # 打印日志，确认已保存
+        # 先试用你原有的转换工具（有些实现吃 (B,C,H,W)[0..1]）
+        try:
+            imgs = list(tensor_to_pil_image(samples))
+        except Exception as e:
+            print(f"[WARN] tensor_to_pil_image failed: {repr(e)}. Fallback to manual saver.", flush=True)
+            imgs = []
+
+        # 没产出就走兜底保存
+        if len(imgs) == 0:
+            print("[INFO] tensor_to_pil_image produced 0 images. Using fallback saver.", flush=True)
+            for j in range(B):
+                save_tensor_png(samples[j], save_dir / f"{sidx + j}.png")
+        else:
+            for j, img in zip(range(sidx, eidx), imgs):
+                img.save(save_dir / f"{j}.png")
+
+        print(f"[INFO] saved [{sidx}, {eidx}) -> {eidx - sidx} files", flush=True)
+
+    print(f"[DONE] All images saved to: {save_dir.resolve()}", flush=True)
 
 
-# ============ 程序入口 ============
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()               # 新建参数解析器
+    import argparse
+
+    parser = argparse.ArgumentParser()
 
     # 基础参数
-    parser.add_argument("--batch_size", type=int, default=64)    # 每批次生成多少张图
-    parser.add_argument("--gpu", type=int, default=0)            # 使用哪块 GPU（如 0 表示 "cuda:0"）
-    parser.add_argument("--ckpt_path", type=str, required=True)  # 模型 checkpoint 路径
-    parser.add_argument("--save_dir", type=str, required=True)   # 输出图像保存路径
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--ckpt_path", type=str, required=True)
+    parser.add_argument("--save_dir", type=str, required=True)
+    parser.add_argument("--num_samples", type=int, default=500, help="总生成数量")
 
     # 模型预测相关
     parser.add_argument("--predictor", type=str, default="noise",
-                        choices=["noise", "x0", "mean"])  
-    # predictor：选择反向扩散时预测什么量
-    #   - noise：预测噪声
-    #   - x0：预测干净图像
-    #   - mean：预测均值
+                        choices=["noise", "x0", "mean"])
 
     # 调度器参数
     parser.add_argument("--mode", type=str, default="linear",
-                        choices=["linear", "cosine", "quad"]) 
-    # β 的调度模式（线性 / 余弦 / 二次函数）
-    parser.add_argument("--beta_1", type=float, default=1e-4)    # β 起始值
-    parser.add_argument("--beta_T", type=float, default=0.02)    # β 结束值
+                        choices=["linear", "cosine", "quad"])
+    parser.add_argument("--beta_1", type=float, default=1e-4)
+    parser.add_argument("--beta_T", type=float, default=0.02)
 
-    # CFG 相关
-    parser.add_argument("--use_cfg", action="store_true")        # 是否启用 CFG
-    parser.add_argument("--sample_method", type=str, default="ddpm")  
-    # 采样方法（如 ddpm / ddim，可扩展，这里默认 ddpm）
-    parser.add_argument("--cfg_scale", type=float, default=7.5)  # CFG 引导强度，常用 3~8，默认 7.5
+    # CFG（可选）
+    parser.add_argument("--use_cfg", action="store_true")
+    parser.add_argument("--cfg_scale", type=float, default=7.5)
 
-    args = parser.parse_args()                                   # 从命令行解析参数
-    main(args)                                                   # 执行主逻辑
+    args = parser.parse_args()
 
+    print("[INFO] args parsed, starting main()", flush=True)
+    main(args)

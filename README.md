@@ -101,7 +101,7 @@ python train.py --mode linear --predictor noise
 ```
 python sampling.py --ckpt_path {CKPT} --save_dir {SAVE} --mode {BETA_SCHEDULING} --predictor {PREDICTOR} 
 ```
-
+python sampling.py   --ckpt_path /data/XHH/DDPM/Lab1-DDPM/image_diffusion_todo/results/predictor_x0/beta_quad/09-28-155916/last.ckpt   --save_dir results/samples_x0_quad/09-29-0000   --mode quad   --predictor x0
 **Evaluation**
 ```
 python dataset.py   # Run once to prepare AFHQ eval set

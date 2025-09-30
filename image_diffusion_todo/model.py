@@ -176,7 +176,8 @@ class DiffusionModule(nn.Module):
 
     def load(self, file_path):
         # 加载模型：从文件中恢复 hparams 与参数
-        dic = torch.load(file_path, map_location="cpu")  # 先加载到 CPU，避免无卡环境报错
+        dic = torch.load(file_path, map_location="cpu", weights_only=False)
+  # 先加载到 CPU，避免无卡环境报错
         hparams = dic["hparams"]
         state_dict = dic["state_dict"]
 
